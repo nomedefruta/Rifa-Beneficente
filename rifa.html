@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RifaFácil - Multi Campanhas</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        window.firebaseModules = { 
+            initializeApp, getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken, 
+            getFirestore, doc, setDoc, getDoc, onSnapshot 
+        };
+    </script>
+    
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; }
+        .ticket-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
+            gap: 0.5rem;
+        }
+        @keyframes modalShow {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        .animate-modal { animation: modalShow 0.2s ease-out forwards; }
+        .loader {
+            border: 3px solid #f3f3f3;
+            border-radius: 50%;
+            border-top: 3px solid #10b981;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+        
+        // --- CONFIGURAÇÃO FIREBASE ---
+        const getFirebaseConfig = () => {
+            if (typeof window.__firebase_config !== 'undefined' && window.__firebase_config) {
+                try { return JSON.parse(window.__firebase_config); } catch (e) { console.error(e); }
+            }
+            return {
+                apiKey: "AIzaSyDNIfTmViAyi1GViGH_MSEnPg26EB5FcyY",
+                authDomain: "rifasolidaria-30f4b.firebaseapp.com",
+                projectId: "rifasolidaria-30f4b",
+                storageBucket: "rifasolidaria-30f4b.firebasestorage.app",
+                messagingSenderId: "210062385888",
+                appId: "1:210062385888:web:4d3289be7ac24e9a9fa685"
+            };
+        };
+
+        const firebaseConfig = getFirebaseConfig();
+        const appId = window.__app_id || 'rifa-solidaria-app';
+        
+        // --- UTILITÁRIOS PIX ---
+        const formatString = (id, value) => {
+            const val = value.toString();
+            const len = val.length.toString().padStart(2, '0');
+            return `${id}${len}${val}`;
+        };
+
+        const generateCRC16 = (payload) => {
+            let crc = 0xFFFF;
+            for (let i = 0; i < payload.length; i++) {
+                crc ^= payload.charCodeAt(i) << 8;
+                for (let j = 0; j < 8; j++) {
+                    if ((crc & 0x8000) !== 0) crc = (crc << 1) ^ 0x1021;
+                    else crc = crc << 1;
+                }
+            }
+            return (crc & 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+        };
+
+        const generatePixPayload = (key, name, city, amount, txid = 'RIFA123') => {
+            const cleanKey = key.replace(/\s/g, '');
+            const cleanName = name.substring(0, 25).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+            const cleanCity = city.substring(0, 15).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+            const cleanAmount = amount.toFixed(2);
+            let payload = formatString('00', '01') + formatString('26', formatString('00', 'BR.GOV.BCB.PIX') + formatString('01', cleanKey)) + formatString('52', '0000') + formatString('53', '986') + formatString('54', cleanAmount) + formatString('58', 'BR') + formatString('59', cleanName) + formatString('60', cleanCity) + formatString('62', formatString('05', txid)) + '6304';
+            return payload + generateCRC16(payload);
+        };
+
+        // --- UTILITÁRIO DE IMAGEM ---
+        const resizeImage = (file) => {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const MAX_WIDTH = 200; // Tamanho ideal para logo
+                        const scaleSize = MAX_WIDTH / img.width;
+                        canvas.width = MAX_WIDTH;
+                        canvas.height = img.height * scaleSize;
+                        
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        
+                        const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+                        resolve(dataUrl);
+                    };
+                    img.src = event.target.result;
+                };
+                reader.readAsDataURL(file);
+            });
+        };
+
+        // --- ÍCONES ---
+        const ICONS = {
+            Settings: <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />,
+            QrCode: <g><rect width="5" height="5" x="3" y="3" rx="1" /><rect width="5" height="5" x="16" y="3" rx="1" /><rect width="5" height="5" x="3" y="16" rx="1" /><path d="M21 16h-3a2 2 0 0 0-2 2v3" /><path d="M21 21v.01" /><path d="M12 7v3a2 2 0 0 1-2 2H7" /><path d="M3 12h.01" /><path d="M12 3h.01" /><path d="M12 16v.01" /><path d="M16 12h1" /><path d="M21 12v.01" /><path d="M12 21v-1" /></g>,
+            Save: <g><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><polyline points="17 21 17 13 7 13 7 21" /><polyline points="7 3 7 8 15 8" /></g>,
+            X: <g><path d="M18 6 6 18" /><path d="m6 6 18 18" /></g>,
+            Copy: <g><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></g>,
+            CheckCircle: <g><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" /></g>,
+            ArrowRight: <g><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></g>,
+            ArrowLeft: <g><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></g>,
+            CloudCheck: <g><path d="M12 15a4 4 0 0 0 3.75-5.5 3.5 3.5 0 1 0-7.5 0A4 4 0 0 0 12 15Z" /><path d="m9 16 2 2 4-4" /></g>,
+            CloudOff: <g><path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242" /><path d="M12 12v9" /><path d="m8 21 4-4 4 4" /></g>,
+            AlertTriangle: <g><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></g>,
+            Lock: <g><rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></g>,
+            Mail: <g><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></g>,
+            User: <g><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></g>,
+            Edit: <g><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></g>,
+            Image: <g><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></g>,
+            Share: <g><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></g>
+        };
+
+        const Icon = ({ name, size = 20, className = "" }) => {
+            const iconContent = ICONS[name];
+            return iconContent ? <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>{iconContent}</svg> : null;
+        };
+
+        // --- COMPONENTES ---
+
+        const Dashboard = ({ campaigns, onSelect, onAdmin }) => {
+            const handleShare = () => {
+                const url = window.location.href.split('#')[0]; // Pega a URL limpa
+                navigator.clipboard.writeText(url).then(() => {
+                    alert('Link do App copiado! Envie para seus contatos.');
+                });
+            };
+
+            return (
+                <div className="min-h-screen bg-gray-50 p-4">
+                    <div className="max-w-md mx-auto">
+                        <div className="flex justify-between items-center mb-6">
+                            <h1 className="text-2xl font-bold text-gray-800">Rifas Disponíveis</h1>
+                            <div className="flex gap-2">
+                                <button onClick={handleShare} className="bg-emerald-100 text-emerald-700 p-2 rounded-full hover:bg-emerald-200" title="Compartilhar App">
+                                    <Icon name="Share" size={20}/>
+                                </button>
+                                <button onClick={onAdmin} className="text-gray-400 hover:text-gray-600 p-2" title="Área Admin">
+                                    <Icon name="Lock" size={20}/>
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div className="space-y-4">
+                            {campaigns.map(camp => (
+                                <div key={camp.id} onClick={() => onSelect(camp.id)} className="bg-white p-4 rounded-xl shadow-md cursor-pointer hover:shadow-lg transition-all border border-gray-100 flex items-start gap-4">
+                                    <div className="w-20 h-20 bg-gray-100 rounded-lg flex items-center justify-center overflow-hidden shrink-0 border border-gray-200 mt-1">
+                                        {camp.logoUrl ? <img src={camp.logoUrl} alt="Logo" className="w-full h-full object-contain" /> : <Icon name="QrCode" size={32} className="text-gray-300"/>}
+                                    </div>
+                                    <div className="flex-1">
+                                        <h3 className="font-bold text-lg text-gray-800 leading-tight mb-1">{camp.title}</h3>
+                                        {camp.description && (
+                                            <p className="text-xs text-gray-500 mb-2 line-clamp-2">{camp.description}</p>
+                                        )}
+                                        <div className="flex items-center justify-between">
+                                            <p className="text-emerald-600 font-bold">R$ {parseFloat(camp.price).toFixed(2)}</p>
+                                            <div className="text-gray-300"><Icon name="ArrowRight" size={18} /></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const AdminPanel = ({ campaigns, ticketsData, onUpdateStatus, onBack, onEditConfig }) => {
+            const [selectedCamp, setSelectedCamp] = useState(campaigns[0]?.id);
+            const currentTickets = ticketsData[selectedCamp] || {};
+            
+            // Filter only sold or pending
+            const activeTickets = Object.entries(currentTickets).filter(([_, t]) => t.status !== 'available');
+            const pendingCount = activeTickets.filter(([_, t]) => t.status === 'pending').length;
+
+            const sendReceipt = (ticketNum, ticketData) => {
+                const campaign = campaigns.find(c => c.id === selectedCamp);
+                const receipt = `
+RECIBO DE PAGAMENTO - RIFA FÁCIL
+--------------------------------
+Campanha: ${campaign.title}
+Número: #${ticketNum}
+Comprador: ${ticketData.buyer}
+Email: ${ticketData.email}
+Valor: R$ ${campaign.price}
+Status: APROVADO
+--------------------------------
+Enviado email de confirmação para:
+${ticketData.email}
+                `;
+                alert(receipt);
+            };
+
+            return (
+                <div className="min-h-screen bg-gray-100 p-4">
+                    <div className="max-w-2xl mx-auto">
+                        <div className="flex items-center gap-4 mb-6">
+                            <button onClick={onBack} className="p-2 bg-white rounded-full shadow"><Icon name="ArrowLeft"/></button>
+                            <h1 className="text-xl font-bold">Painel Administrativo</h1>
+                        </div>
+
+                        {/* Tabs */}
+                        <div className="flex gap-2 mb-6 overflow-x-auto pb-2">
+                            {campaigns.map(c => (
+                                <button 
+                                    key={c.id} 
+                                    onClick={() => setSelectedCamp(c.id)}
+                                    className={`px-4 py-2 rounded-full whitespace-nowrap text-sm font-bold ${selectedCamp === c.id ? 'bg-emerald-600 text-white' : 'bg-white text-gray-600'}`}
+                                >
+                                    {c.title}
+                                </button>
+                            ))}
+                        </div>
+
+                        <div className="bg-white rounded-xl shadow p-4 mb-4">
+                            <div className="flex justify-between items-center mb-4">
+                                <h2 className="font-bold text-lg">Gerenciar Vendas</h2>
+                                <button onClick={() => onEditConfig(selectedCamp)} className="text-emerald-600 text-sm flex items-center gap-1"><Icon name="Edit" size={14}/> Editar Rifa</button>
+                            </div>
+
+                            {pendingCount > 0 && (
+                                <div className="bg-yellow-50 text-yellow-800 p-3 rounded-lg mb-4 text-sm flex gap-2 items-center">
+                                    <Icon name="AlertTriangle" size={16}/>
+                                    <span>Você tem <b>{pendingCount}</b> vendas pendentes de aprovação!</span>
+                                </div>
+                            )}
+
+                            <div className="space-y-3">
+                                {activeTickets.length === 0 ? (
+                                    <p className="text-gray-400 text-center py-8">Nenhuma venda registrada ainda.</p>
+                                ) : (
+                                    activeTickets.map(([num, data]) => (
+                                        <div key={num} className="border border-gray-100 rounded-lg p-3 flex justify-between items-center">
+                                            <div>
+                                                <div className="flex items-center gap-2">
+                                                    <span className="font-bold text-lg">#{num.toString().padStart(3, '0')}</span>
+                                                    <span className={`text-xs px-2 py-0.5 rounded-full ${data.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}`}>
+                                                        {data.status === 'pending' ? 'PENDENTE' : 'PAGO'}
+                                                    </span>
+                                                </div>
+                                                <p className="text-sm font-medium">{data.buyer}</p>
+                                                <p className="text-xs text-gray-500">{data.email}</p>
+                                            </div>
+                                            <div className="flex gap-2">
+                                                {data.status === 'pending' && (
+                                                    <>
+                                                        <button 
+                                                            onClick={() => {
+                                                                if(confirm("Confirma o pagamento?")) {
+                                                                    onUpdateStatus(selectedCamp, num, 'sold', data);
+                                                                    sendReceipt(num, data);
+                                                                }
+                                                            }}
+                                                            className="bg-green-500 text-white p-2 rounded hover:bg-green-600" title="Aprovar"
+                                                        >
+                                                            <Icon name="CheckCircle" size={18} />
+                                                        </button>
+                                                        <button 
+                                                            onClick={() => {
+                                                                if(confirm("Rejeitar e liberar o número?")) {
+                                                                    onUpdateStatus(selectedCamp, num, 'available', null);
+                                                                }
+                                                            }}
+                                                            className="bg-red-500 text-white p-2 rounded hover:bg-red-600" title="Rejeitar"
+                                                        >
+                                                            <Icon name="X" size={18} />
+                                                        </button>
+                                                    </>
+                                                )}
+                                                {data.status === 'sold' && (
+                                                    <button 
+                                                        onClick={() => sendReceipt(num, data)}
+                                                        className="text-gray-400 hover:text-emerald-600 p-2" title="Reenviar Recibo"
+                                                    >
+                                                        <Icon name="Mail" size={18} />
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const ConfigModal = ({ campaign, onSave, onClose }) => {
+            const [data, setData] = useState(campaign);
+            const [uploading, setUploading] = useState(false);
+
+            const handleChange = (e) => {
+                const { name, value } = e.target;
+                setData(prev => ({ ...prev, [name]: value }));
+            };
+
+            const handleImageUpload = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                
+                setUploading(true);
+                try {
+                    const base64 = await resizeImage(file);
+                    setData(prev => ({ ...prev, logoUrl: base64 }));
+                } catch (error) {
+                    alert("Erro ao processar imagem");
+                    console.error(error);
+                }
+                setUploading(false);
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50 animate-modal backdrop-blur-sm">
+                    <div className="bg-white w-full max-w-md rounded-2xl shadow-xl p-6 max-h-[90vh] overflow-y-auto">
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-xl font-bold">Editar: {data.title}</h2>
+                            <button onClick={onClose}><Icon name="X"/></button>
+                        </div>
+                        <div className="space-y-4">
+                            <div>
+                                <label className="text-sm font-bold text-gray-700 block mb-2">Logo da Rifa</label>
+                                <div className="flex items-center gap-4">
+                                    <div className="w-16 h-16 bg-gray-100 rounded-lg border border-gray-300 flex items-center justify-center overflow-hidden shrink-0">
+                                        {data.logoUrl ? (
+                                            <img src={data.logoUrl} alt="Preview" className="w-full h-full object-contain" />
+                                        ) : (
+                                            <Icon name="Image" className="text-gray-400" />
+                                        )}
+                                    </div>
+                                    <label className="flex-1">
+                                        <span className="bg-emerald-50 text-emerald-700 px-4 py-2 rounded-lg text-sm font-bold cursor-pointer hover:bg-emerald-100 block text-center border border-emerald-200">
+                                            {uploading ? "Processando..." : "Escolher Imagem do PC"}
+                                        </span>
+                                        <input 
+                                            type="file" 
+                                            accept="image/*" 
+                                            className="hidden" 
+                                            onChange={handleImageUpload}
+                                        />
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="text-sm font-bold text-gray-700">Título</label>
+                                <input type="text" name="title" value={data.title} onChange={handleChange} className="w-full p-2 border rounded mt-1 text-sm" />
+                            </div>
+
+                            <div>
+                                <label className="text-sm font-bold text-gray-700">Descrição do Prêmio</label>
+                                <textarea name="description" value={data.description || ''} onChange={handleChange} className="w-full p-2 border rounded mt-1 text-sm" rows="3" placeholder="Detalhes do que está sendo sorteado..."></textarea>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="text-sm font-bold text-gray-700">Preço (R$)</label>
+                                    <input type="number" name="price" value={data.price} onChange={handleChange} className="w-full p-2 border rounded mt-1" />
+                                </div>
+                                <div>
+                                    <label className="text-sm font-bold text-gray-700">Qtd. Números</label>
+                                    <input type="number" name="totalNumbers" value={data.totalNumbers} onChange={handleChange} className="w-full p-2 border rounded mt-1" />
+                                </div>
+                            </div>
+                            <div className="bg-gray-50 p-3 rounded border">
+                                <p className="text-xs font-bold text-gray-500 uppercase mb-2">Dados Pix</p>
+                                <input type="text" name="pixKey" value={data.pixKey} onChange={handleChange} className="w-full p-2 border rounded mb-2 text-sm" placeholder="Chave Pix" />
+                                <input type="text" name="merchantName" value={data.merchantName} onChange={handleChange} className="w-full p-2 border rounded mb-2 text-sm" placeholder="Nome" />
+                                <input type="text" name="merchantCity" value={data.merchantCity} onChange={handleChange} className="w-full p-2 border rounded text-sm" placeholder="Cidade" />
+                            </div>
+                            <button onClick={() => onSave(data)} className="w-full bg-emerald-600 text-white py-3 rounded-lg font-bold">Salvar Alterações</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const CheckoutModal = ({ selectedTickets, campaign, onClose, onConfirm }) => {
+            const total = selectedTickets.length * campaign.price;
+            const [step, setStep] = useState(1);
+            const [formData, setFormData] = useState({ name: '', email: '' });
+            const [pixPayload, setPixPayload] = useState('');
+
+            useEffect(() => {
+                if (step === 2 && campaign.pixKey) {
+                    setPixPayload(generatePixPayload(campaign.pixKey, campaign.merchantName || 'Admin', campaign.merchantCity || 'BR', total));
+                }
+            }, [step]);
+
+            return (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50 animate-modal backdrop-blur-sm">
+                    <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+                        <div className="bg-emerald-600 p-4 text-white flex justify-between items-center">
+                            <h3 className="font-bold text-lg">{step === 1 ? 'Seus Dados' : 'Pagamento Pix'}</h3>
+                            <button onClick={onClose}><Icon name="X" size={24} /></button>
+                        </div>
+                        
+                        <div className="p-6 overflow-y-auto">
+                            {step === 1 ? (
+                                <div className="space-y-4">
+                                    <div className="bg-emerald-50 p-4 rounded-lg border border-emerald-100 text-center">
+                                        <p className="text-sm text-emerald-800 mb-1">Você escolheu {selectedTickets.length} número(s)</p>
+                                        <p className="text-2xl font-bold text-emerald-700">Total: R$ {total.toFixed(2)}</p>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">Nome Completo</label>
+                                        <input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full p-3 border rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none" placeholder="Seu nome" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">Email para Comprovante</label>
+                                        <input type="email" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} className="w-full p-3 border rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none" placeholder="seu@email.com" />
+                                    </div>
+                                    <button onClick={() => (formData.name && formData.email) ? setStep(2) : alert("Preencha tudo!")} className="w-full bg-emerald-600 text-white py-3 rounded-lg font-bold mt-2">Continuar para Pix</button>
+                                </div>
+                            ) : (
+                                <div className="text-center space-y-4">
+                                    <div className="bg-white border-2 border-emerald-100 p-2 rounded-xl inline-block shadow-sm">
+                                        <img src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(pixPayload)}`} className="w-48 h-48" />
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <input type="text" readOnly value={pixPayload} className="w-full bg-gray-100 border text-gray-600 text-xs p-2 rounded truncate" />
+                                        <button onClick={() => {navigator.clipboard.writeText(pixPayload); alert("Copiado!");}} className="bg-emerald-100 text-emerald-700 p-2 rounded"><Icon name="Copy"/></button>
+                                    </div>
+                                    <p className="text-xs text-gray-500">Após pagar, clique abaixo. Seu status ficará como "Pendente" até a aprovação do admin.</p>
+                                    <button onClick={() => onConfirm(formData)} className="w-full bg-emerald-600 text-white py-3 rounded-lg font-bold flex justify-center items-center gap-2"><Icon name="CheckCircle" /> Já realizei o pagamento</button>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [view, setView] = useState('loading'); // loading, dashboard, raffle, admin
+            const [user, setUser] = useState(null);
+            const [db, setDb] = useState(null);
+            const [offline, setOffline] = useState(false);
+            
+            // Data
+            const [campaigns, setCampaigns] = useState({});
+            const [tickets, setTickets] = useState({}); // { campaignId: { num: { status... } } }
+            const [activeCampaignId, setActiveCampaignId] = useState(null);
+            const [selected, setSelected] = useState([]);
+            const [showCheckout, setShowCheckout] = useState(false);
+            const [showConfig, setShowConfig] = useState(false);
+
+            // Defaults
+            const defaultCampaigns = {
+                'yoga': { 
+                    id: 'yoga', 
+                    title: '1 Mês de Yoga Grátis', 
+                    description: 'Ganhe 1 mês de aulas de Yoga presenciais, 3x na semana. Inclui matrícula grátis!',
+                    price: 10, 
+                    totalNumbers: 100, 
+                    logoUrl: 'https://cdn-icons-png.flaticon.com/512/2647/2647625.png', 
+                    pixKey: '', merchantName: '', merchantCity: '' 
+                },
+                'chama': { 
+                    id: 'chama', 
+                    title: 'Ingresso Chama no Merengue', 
+                    description: '1 Ingresso VIP para o show Chama no Merengue com direito a camarote open bar.',
+                    price: 15, 
+                    totalNumbers: 200, 
+                    logoUrl: 'https://cdn-icons-png.flaticon.com/512/2405/2405597.png', 
+                    pixKey: '', merchantName: '', merchantCity: '' 
+                }
+            };
+
+            // Init
+            useEffect(() => {
+                const init = async () => {
+                    const { initializeApp, getAuth, signInAnonymously, onAuthStateChanged, getFirestore } = window.firebaseModules;
+                    try {
+                        const app = initializeApp(firebaseConfig);
+                        const auth = getAuth(app);
+                        const database = getFirestore(app);
+                        setDb(database);
+
+                        await signInAnonymously(auth).catch(() => setOffline(true));
+                        
+                        onAuthStateChanged(auth, u => {
+                            if (u) setUser(u);
+                            else setOffline(true);
+                        });
+                    } catch (e) {
+                        setOffline(true);
+                    }
+                };
+                init();
+            }, []);
+
+            // Data Sync
+            useEffect(() => {
+                if (offline) {
+                    const savedCamps = localStorage.getItem('campaigns');
+                    const savedTix = localStorage.getItem('tickets');
+                    setCampaigns(savedCamps ? JSON.parse(savedCamps) : defaultCampaigns);
+                    setTickets(savedTix ? JSON.parse(savedTix) : {});
+                    setView('dashboard');
+                    return;
+                }
+                
+                if (!user || !db) return;
+                const { doc, onSnapshot } = window.firebaseModules;
+
+                // Watch Campaigns
+                const unsubCamps = onSnapshot(doc(db, 'artifacts', appId, 'users', user.uid, 'data', 'campaigns'), snap => {
+                    if (snap.exists()) setCampaigns(snap.data());
+                    else setCampaigns(defaultCampaigns); // Initial seed
+                    if (view === 'loading') setView('dashboard');
+                });
+
+                // Watch Tickets
+                const unsubTix = onSnapshot(doc(db, 'artifacts', appId, 'users', user.uid, 'data', 'tickets'), snap => {
+                    if (snap.exists()) setTickets(snap.data());
+                });
+
+                return () => { unsubCamps(); unsubTix(); };
+            }, [user, db, offline]);
+
+            const saveData = async (type, data) => {
+                if (offline) {
+                    localStorage.setItem(type, JSON.stringify(data));
+                    if(type === 'campaigns') setCampaigns(data);
+                    if(type === 'tickets') setTickets(data);
+                    return;
+                }
+                const { doc, setDoc } = window.firebaseModules;
+                await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'data', type), data);
+            };
+
+            const handlePurchase = async (userData) => {
+                const currentTix = tickets[activeCampaignId] || {};
+                const updates = {};
+                selected.forEach(num => {
+                    updates[num] = { 
+                        status: 'pending', // Pending approval
+                        buyer: userData.name, 
+                        email: userData.email, 
+                        timestamp: Date.now() 
+                    };
+                });
+                
+                const newAllTickets = { ...tickets, [activeCampaignId]: { ...currentTix, ...updates } };
+                await saveData('tickets', newAllTickets);
+                
+                setSelected([]);
+                setShowCheckout(false);
+                alert("Reserva realizada! Aguardando aprovação do administrador.");
+            };
+
+            const handleStatusUpdate = async (campId, num, status, ticketData) => {
+                const campTix = tickets[campId] || {};
+                let newCampTix = { ...campTix };
+                
+                if (status === 'available') delete newCampTix[num];
+                else newCampTix[num] = { ...ticketData, status: status };
+
+                const newAllTickets = { ...tickets, [campId]: newCampTix };
+                await saveData('tickets', newAllTickets);
+            };
+
+            const handleConfigSave = async (updatedCamp) => {
+                const newCampaigns = { ...campaigns, [updatedCamp.id]: updatedCamp };
+                await saveData('campaigns', newCampaigns);
+                setShowConfig(false);
+            };
+
+            const enterAdmin = () => {
+                const pass = prompt("Senha do Administrador:");
+                if (pass === '1234') setView('admin');
+                else alert("Senha incorreta");
+            };
+
+            // --- RENDER ---
+
+            if (view === 'loading') return <div className="min-h-screen flex items-center justify-center"><div className="loader"></div></div>;
+
+            if (view === 'dashboard') return (
+                <Dashboard 
+                    campaigns={Object.values(campaigns)} 
+                    onSelect={id => { setActiveCampaignId(id); setView('raffle'); }} 
+                    onAdmin={enterAdmin}
+                />
+            );
+
+            if (view === 'admin') return (
+                <>
+                    <AdminPanel 
+                        campaigns={Object.values(campaigns)} 
+                        ticketsData={tickets}
+                        onUpdateStatus={handleStatusUpdate}
+                        onBack={() => setView('dashboard')}
+                        onEditConfig={(id) => { setActiveCampaignId(id); setShowConfig(true); }}
+                    />
+                    {showConfig && activeCampaignId && (
+                        <ConfigModal 
+                            campaign={campaigns[activeCampaignId]} 
+                            onSave={handleConfigSave} 
+                            onClose={() => setShowConfig(false)} 
+                        />
+                    )}
+                </>
+            );
+
+            // Raffle View
+            const activeCamp = campaigns[activeCampaignId];
+            const activeTix = tickets[activeCampaignId] || {};
+
+            return (
+                <div className="min-h-screen pb-24">
+                    <header className="bg-white shadow sticky top-0 z-30">
+                        <div className="max-w-2xl mx-auto px-4 py-3 flex items-center gap-3">
+                            <button onClick={() => { setView('dashboard'); setSelected([]); }} className="text-gray-500"><Icon name="ArrowLeft"/></button>
+                            <div className="flex-1 overflow-hidden">
+                                <h1 className="font-bold text-gray-800 text-lg truncate">{activeCamp.title}</h1>
+                                <p className="text-xs text-emerald-600 font-bold">R$ {parseFloat(activeCamp.price).toFixed(2)}</p>
+                            </div>
+                            {activeCamp.logoUrl && <img src={activeCamp.logoUrl} className="w-8 h-8 rounded-full object-contain border bg-gray-50" />}
+                        </div>
+                        {activeCamp.description && (
+                            <div className="bg-emerald-50 px-4 py-2 border-t border-emerald-100">
+                                <p className="text-xs text-emerald-800 text-center">{activeCamp.description}</p>
+                            </div>
+                        )}
+                    </header>
+
+                    <main className="max-w-2xl mx-auto p-4">
+                        <div className="flex gap-4 text-xs font-bold text-gray-600 mb-4 justify-center">
+                            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-white border"></span> Livre</span>
+                            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-emerald-500"></span> Selecionado</span>
+                            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-yellow-400"></span> Pendente</span>
+                            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-red-500"></span> Vendido</span>
+                        </div>
+
+                        <div className="ticket-grid">
+                            {Array.from({ length: parseInt(activeCamp.totalNumbers) }, (_, i) => i + 1).map(num => {
+                                const t = activeTix[num];
+                                const status = t?.status || 'available';
+                                const isSelected = selected.includes(num);
+
+                                let colorClass = "bg-white border-gray-300 text-gray-700 hover:border-emerald-500";
+                                if (status === 'sold') colorClass = "bg-red-500 border-red-600 text-white cursor-not-allowed opacity-90";
+                                else if (status === 'pending') colorClass = "bg-yellow-400 border-yellow-500 text-yellow-900 cursor-not-allowed opacity-90";
+                                else if (isSelected) colorClass = "bg-emerald-500 border-emerald-600 text-white transform scale-105 shadow-md";
+
+                                return (
+                                    <button 
+                                        key={num}
+                                        disabled={status !== 'available'}
+                                        onClick={() => {
+                                            if (selected.includes(num)) setSelected(selected.filter(n => n !== num));
+                                            else setSelected([...selected, num]);
+                                        }}
+                                        className={`h-12 rounded border-2 font-bold flex items-center justify-center transition-all ${colorClass}`}
+                                    >
+                                        {num}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </main>
+
+                    {selected.length > 0 && (
+                        <div className="fixed bottom-0 left-0 right-0 bg-white border-t p-4 shadow-lg z-40">
+                            <div className="max-w-2xl mx-auto flex justify-between items-center">
+                                <div>
+                                    <p className="text-gray-500 text-xs">Selecionados: {selected.length}</p>
+                                    <p className="text-xl font-bold text-emerald-700">R$ {(selected.length * activeCamp.price).toFixed(2)}</p>
+                                </div>
+                                <button onClick={() => setShowCheckout(true)} className="bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 transition flex items-center gap-2">
+                                    Apostar <Icon name="ArrowRight" size={18}/>
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {showCheckout && (
+                        <CheckoutModal 
+                            selectedTickets={selected} 
+                            campaign={activeCamp} 
+                            onClose={() => setShowCheckout(false)} 
+                            onConfirm={handlePurchase} 
+                        />
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
